@@ -1,20 +1,23 @@
-# ============================================================
-#  vc_movie_bot.py — Single-file Telegram VC Movie Player Bot
-#
-#  Install:
-#    pip install pyrogram tgcrypto pytgcalls yt-dlp pillow
-#    sudo apt install ffmpeg
-#
-#  Run:
-#    python vc_movie_bot.py
-# ============================================================
+#!/usr/bin/env python3
+"""
+VC Movie Player Bot + Keep-Alive Web Server
+Deploy on Replit — stays alive 24/7 with UptimeRobot pinging it
+"""
+
+# ═══════════════════════════════════════════════════════════════
+#  INSTALL (run in Replit Shell before starting):
+#  apt install ffmpeg -y
+#  pip install pyrogram tgcrypto pytgcalls yt-dlp pillow
+# ═══════════════════════════════════════════════════════════════
 
 import asyncio
 import os
 import re
 import random
+import threading
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from pyrogram import Client, filters
 from pyrogram.types import (
@@ -24,24 +27,58 @@ from pyrogram.types import (
 from pytgcalls import PyTgCalls
 from pytgcalls.types import Update
 from pytgcalls.types.stream import StreamAudioEnded, StreamVideoEnded
-from pytgcalls.types.input_stream import AudioVideoPiped, AudioPiped
+from pytgcalls.types.input_stream import AudioVideoPiped
 from pytgcalls.types.input_stream.quality import HighQualityAudio, HighQualityVideo
 
 
 # ═══════════════════════════════════════════════════════════════
-#  CONFIG  ← fill these in before running
+#  CONFIG — fill these in
 # ═══════════════════════════════════════════════════════════════
 
-API_ID      = int(os.getenv("API_ID",    "YOUR_API_ID"))
-API_HASH    =     os.getenv("API_HASH",   "YOUR_API_HASH")
-BOT_TOKEN   =     os.getenv("BOT_TOKEN",  "YOUR_BOT_TOKEN")
+API_ID    = int(os.getenv("API_ID",    "12345678"))    # from my.telegram.org
+API_HASH  =     os.getenv("API_HASH",  "your_api_hash")
+BOT_TOKEN =     os.getenv("BOT_TOKEN", "your_bot_token")
 
-DOWNLOAD_DIR    = os.getenv("DOWNLOAD_DIR", "./downloads")
-DEFAULT_VOLUME  = 100
-MAX_QUEUE       = 20
-YTDLP_FORMAT    = "bestvideo[height<=720]+bestaudio/best[height<=720]"
+DOWNLOAD_DIR   = "./downloads"
+DEFAULT_VOLUME = 100
+MAX_QUEUE      = 20
+YTDLP_FORMAT   = "bestvideo[height<=720]+bestaudio/best[height<=720]"
+
+# Port for keep-alive server (Replit needs port 8080)
+KEEP_ALIVE_PORT = 8080
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  KEEP-ALIVE WEB SERVER
+#  Replit sleeps if nothing is listening on a port.
+#  UptimeRobot pings this every 5 mins to keep it awake.
+# ═══════════════════════════════════════════════════════════════
+
+class KeepAliveHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
+        self.wfile.write(b"""
+        <html>
+        <body style="background:#111;color:#0f0;font-family:monospace;text-align:center;padding:50px">
+            <h1>&#127916; VC Movie Bot</h1>
+            <p>Bot is ALIVE and running 24/7</p>
+            <p style="color:#888">Keep-alive server active</p>
+        </body>
+        </html>
+        """)
+
+    def log_message(self, format, *args):
+        pass  # suppress request logs
+
+
+def run_keep_alive():
+    server = HTTPServer(("0.0.0.0", KEEP_ALIVE_PORT), KeepAliveHandler)
+    print(f"✅ Keep-alive server running on port {KEEP_ALIVE_PORT}")
+    server.serve_forever()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -119,21 +156,17 @@ def format_queue(chat_id: int) -> str:
         return "📭 Queue is empty."
     lines = []
     if state.current:
-        pos = fmt_time(state.position)
-        dur = fmt_time(state.current.duration)
         loop = " 🔁" if state.loop else ""
         lines.append(
             f"▶️ **Now Playing**{loop}\n"
             f"   `{state.current.title}`\n"
-            f"   ⏱ {pos} / {dur}  👤 {state.current.requested_by}\n"
+            f"   ⏱ {fmt_time(state.position)} / {fmt_time(state.current.duration)}"
+            f"  👤 {state.current.requested_by}\n"
         )
     if state.queue:
         lines.append("📋 **Up Next:**")
         for i, item in enumerate(state.queue, 1):
-            lines.append(
-                f"  {i}. `{item.title}` — {fmt_time(item.duration)}"
-                f"  👤 {item.requested_by}"
-            )
+            lines.append(f"  {i}. `{item.title}` — {fmt_time(item.duration)}  👤 {item.requested_by}")
     return "\n".join(lines)
 
 
@@ -145,7 +178,7 @@ def _sanitize(name: str) -> str:
     return re.sub(r'[\\/*?:"<>|]', "_", name)[:80]
 
 
-async def _run(cmd: list[str]) -> Tuple[int, str, str]:
+async def _run(cmd: list) -> Tuple[int, str, str]:
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -163,7 +196,7 @@ async def probe_duration(path: str) -> int:
     ])
     try:
         return int(float(out.strip()))
-    except Exception:
+    except:
         return 0
 
 
@@ -179,8 +212,7 @@ async def probe_title(path: str) -> str:
 
 async def extract_thumbnail(video_path: str, out_path: str) -> bool:
     code, _, _ = await _run([
-        "ffmpeg", "-y", "-ss", "5",
-        "-i", video_path,
+        "ffmpeg", "-y", "-ss", "5", "-i", video_path,
         "-frames:v", "1", "-q:v", "2", out_path,
     ])
     return code == 0 and os.path.exists(out_path)
@@ -215,7 +247,6 @@ async def download_url(url: str) -> Optional[str]:
 
 
 async def resolve_media(client: Client, message: Message, url: Optional[str] = None):
-    """Returns (file_path, title, duration, thumb_path|None)"""
     path = None
     if url and url.startswith(("http://", "https://")):
         path = await download_url(url)
@@ -225,14 +256,13 @@ async def resolve_media(client: Client, message: Message, url: Optional[str] = N
         target = message.reply_to_message or message
         path   = await download_telegram_file(client, target)
         if not path:
-            raise ValueError("No downloadable media found. Reply to a video or pass a URL.")
+            raise ValueError("No media found. Reply to a video or pass a URL.")
 
     title    = await probe_title(path)
     duration = await probe_duration(path)
     thumb    = os.path.join(DOWNLOAD_DIR, _sanitize(title) + "_thumb.jpg")
     if not os.path.exists(thumb):
         await extract_thumbnail(path, thumb)
-
     return path, title, duration, thumb if os.path.exists(thumb) else None
 
 
@@ -244,43 +274,13 @@ def build_stream(file_path: str, seek: int = 0, speed: float = 1.0,
                  volume: int = 100) -> AudioVideoPiped:
     vf = "null" if speed == 1.0 else f"setpts={1/speed:.4f}*PTS"
     af_parts = []
-    if speed != 1.0:
-        af_parts.append(f"atempo={speed:.2f}")
-    if volume != 100:
-        af_parts.append(f"volume={volume/100:.2f}")
-    af = ",".join(af_parts) if af_parts else "anull"
-
+    if speed != 1.0:  af_parts.append(f"atempo={speed:.2f}")
+    if volume != 100: af_parts.append(f"volume={volume/100:.2f}")
+    af    = ",".join(af_parts) if af_parts else "anull"
     extra = []
     if seek > 0:
         extra += ["-ss", str(seek)]
     extra += ["-vf", vf, "-af", af]
-
-    return AudioVideoPiped(
-        file_path,
-        audio_parameters=HighQualityAudio(),
-        video_parameters=HighQualityVideo(),
-        additional_ffmpeg_parameters=" ".join(extra),
-    )
-
-
-def build_stream_with_subs(file_path: str, srt_path: str, seek: int = 0,
-                            speed: float = 1.0, volume: int = 100) -> AudioVideoPiped:
-    esc = srt_path.replace("\\", "/").replace(":", "\\:")
-    vf  = f"subtitles='{esc}'"
-    if speed != 1.0:
-        vf += f",setpts={1/speed:.4f}*PTS"
-    af_parts = []
-    if speed != 1.0:
-        af_parts.append(f"atempo={speed:.2f}")
-    if volume != 100:
-        af_parts.append(f"volume={volume/100:.2f}")
-    af = ",".join(af_parts) if af_parts else "anull"
-
-    extra = []
-    if seek > 0:
-        extra += ["-ss", str(seek)]
-    extra += ["-vf", vf, "-af", af]
-
     return AudioVideoPiped(
         file_path,
         audio_parameters=HighQualityAudio(),
@@ -296,7 +296,6 @@ def build_stream_with_subs(file_path: str, srt_path: str, seek: int = 0,
 def player_keyboard(paused: bool = False, loop: bool = False) -> InlineKeyboardMarkup:
     pause_label = "▶️ Resume" if paused else "⏸ Pause"
     pause_data  = "resume"   if paused else "pause"
-    loop_label  = "🔁 ON"    if loop   else "🔁 OFF"
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("⏮ Restart",  callback_data="replay"),
@@ -308,15 +307,15 @@ def player_keyboard(paused: bool = False, loop: bool = False) -> InlineKeyboardM
         [
             InlineKeyboardButton("🔉 -10",      callback_data="vol_down"),
             InlineKeyboardButton("🔊 +10",      callback_data="vol_up"),
-            InlineKeyboardButton(loop_label,     callback_data="toggle_loop"),
+            InlineKeyboardButton("🔁 ON" if loop else "🔁 OFF", callback_data="toggle_loop"),
             InlineKeyboardButton("📋 Queue",    callback_data="queue"),
             InlineKeyboardButton("❌ Stop",     callback_data="stop"),
         ],
         [
-            InlineKeyboardButton("0.5x",  callback_data="speed_0.5"),
-            InlineKeyboardButton("1x",    callback_data="speed_1.0"),
-            InlineKeyboardButton("1.5x",  callback_data="speed_1.5"),
-            InlineKeyboardButton("2x",    callback_data="speed_2.0"),
+            InlineKeyboardButton("0.5x", callback_data="speed_0.5"),
+            InlineKeyboardButton("1x",   callback_data="speed_1.0"),
+            InlineKeyboardButton("1.5x", callback_data="speed_1.5"),
+            InlineKeyboardButton("2x",   callback_data="speed_2.0"),
         ],
     ])
 
@@ -347,8 +346,6 @@ class Player:
     async def start(self):
         await self.call.start()
 
-    # ── position tracker ─────────────────────────────────────────
-
     async def _start_tracker(self, chat_id: int):
         async def _tick():
             while True:
@@ -366,8 +363,6 @@ class Player:
         if t:
             t.cancel()
 
-    # ── internal streaming ───────────────────────────────────────
-
     async def _stream(self, chat_id: int, item: MediaItem, seek: int = 0):
         state  = get_state(chat_id)
         stream = build_stream(item.file_path, seek=seek,
@@ -376,11 +371,19 @@ class Player:
             await self.call.join_group_call(chat_id, stream, stream_type=None)
         except Exception:
             await self.call.change_stream(chat_id, stream)
-
         state.current  = item
         state.position = seek
         state.paused   = False
         await self._start_tracker(chat_id)
+
+    def _pop_next(self, chat_id: int) -> Optional[MediaItem]:
+        state = get_state(chat_id)
+        if not state.queue:
+            return None
+        if state.shuffle:
+            idx = random.randrange(len(state.queue))
+            return state.queue.pop(idx)
+        return state.queue.pop(0)
 
     async def _on_track_end(self, chat_id: int):
         async with get_lock(chat_id):
@@ -395,25 +398,14 @@ class Player:
                     await self.on_track_change(chat_id, nxt)
             else:
                 await self._stop_tracker(chat_id)
-                state.current  = None
+                state.current = None
                 state.position = 0
                 try:
                     await self.call.leave_group_call(chat_id)
-                except Exception:
+                except:
                     pass
                 if self.on_queue_empty:
                     await self.on_queue_empty(chat_id)
-
-    def _pop_next(self, chat_id: int) -> Optional[MediaItem]:
-        state = get_state(chat_id)
-        if not state.queue:
-            return None
-        if state.shuffle:
-            idx = random.randrange(len(state.queue))
-            return state.queue.pop(idx)
-        return state.queue.pop(0)
-
-    # ── public API ───────────────────────────────────────────────
 
     async def play(self, chat_id: int, item: MediaItem) -> bool:
         async with get_lock(chat_id):
@@ -432,7 +424,7 @@ class Player:
             await self.call.pause_stream(chat_id)
             state.paused = True
             return True
-        except Exception:
+        except:
             return False
 
     async def resume(self, chat_id: int) -> bool:
@@ -443,19 +435,19 @@ class Player:
             await self.call.resume_stream(chat_id)
             state.paused = False
             return True
-        except Exception:
+        except:
             return False
 
     async def stop(self, chat_id: int):
         await self._stop_tracker(chat_id)
         state = get_state(chat_id)
-        state.current  = None
+        state.current = None
         state.position = 0
-        state.paused   = False
+        state.paused = False
         state.queue.clear()
         try:
             await self.call.leave_group_call(chat_id)
-        except Exception:
+        except:
             pass
 
     async def seek(self, chat_id: int, seconds: int) -> bool:
@@ -502,35 +494,19 @@ class Player:
             await self._stream(chat_id, state.current, seek=0)
         return True
 
-    async def enable_subtitles(self, chat_id: int, srt_path: str) -> bool:
-        state = get_state(chat_id)
-        if not state.current:
-            return False
-        stream = build_stream_with_subs(
-            state.current.file_path, srt_path,
-            seek=state.position, speed=state.speed, volume=state.volume,
-        )
-        try:
-            await self.call.change_stream(chat_id, stream)
-            return True
-        except Exception:
-            return False
-
     def now_playing_text(self, chat_id: int) -> str:
         state = get_state(chat_id)
         if not state.current:
             return "⏹ Nothing is playing."
         item = state.current
-        pos  = fmt_time(state.position)
-        dur  = fmt_time(item.duration)
         bar  = progress_bar(state.position, item.duration)
         icon = "⏸" if state.paused else "▶️"
         spd  = f"  ⚡ {state.speed}x" if state.speed != 1.0 else ""
         loop = "  🔁" if state.loop else ""
         return (
-            f"{icon} **{item.title}**\n"
-            f"{bar}\n"
-            f"⏱ `{pos}` / `{dur}`{spd}  🔊 {state.volume}%{loop}\n"
+            f"{icon} **{item.title}**\n{bar}\n"
+            f"⏱ `{fmt_time(state.position)}` / `{fmt_time(item.duration)}`"
+            f"{spd}  🔊 {state.volume}%{loop}\n"
             f"👤 {item.requested_by}"
         )
 
@@ -539,11 +515,9 @@ class Player:
 #  BOT SETUP
 # ═══════════════════════════════════════════════════════════════
 
-app    = Client("vc_movie_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+app    = Client("vc_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 player = Player(app)
 
-
-# ── panel helpers ─────────────────────────────────────────────
 
 async def send_panel(chat_id: int, text: str, thumb: Optional[str] = None):
     state = get_state(chat_id)
@@ -554,10 +528,8 @@ async def send_panel(chat_id: int, text: str, thumb: Optional[str] = None):
         else:
             sent = await app.send_message(chat_id, text, reply_markup=kb)
         if state.panel_msg_id:
-            try:
-                await app.delete_messages(chat_id, state.panel_msg_id)
-            except Exception:
-                pass
+            try: await app.delete_messages(chat_id, state.panel_msg_id)
+            except: pass
         state.panel_msg_id = sent.id
     except Exception as e:
         print(f"[panel] {e}")
@@ -571,18 +543,13 @@ async def refresh_panel(chat_id: int):
     kb   = player_keyboard(paused=state.paused, loop=state.loop)
     try:
         await app.edit_message_caption(chat_id, state.panel_msg_id, caption=text, reply_markup=kb)
-    except Exception:
-        try:
-            await app.edit_message_text(chat_id, state.panel_msg_id, text, reply_markup=kb)
-        except Exception:
-            pass
+    except:
+        try: await app.edit_message_text(chat_id, state.panel_msg_id, text, reply_markup=kb)
+        except: pass
 
-
-# ── player callbacks ──────────────────────────────────────────
 
 async def _on_track_change(chat_id: int, item: MediaItem):
-    text = player.now_playing_text(chat_id)
-    await send_panel(chat_id, text, item.thumbnail)
+    await send_panel(chat_id, player.now_playing_text(chat_id), item.thumbnail)
 
 
 async def _on_queue_empty(chat_id: int):
@@ -591,22 +558,14 @@ async def _on_queue_empty(chat_id: int):
         try:
             await app.edit_message_text(
                 chat_id, state.panel_msg_id,
-                "⏹ Playback finished. Queue is empty.",
+                "⏹ Queue finished.",
                 reply_markup=stopped_keyboard(),
             )
-        except Exception:
-            pass
+        except: pass
 
 
 player.on_track_change = _on_track_change
 player.on_queue_empty  = _on_queue_empty
-
-
-async def _requester(msg: Message) -> str:
-    u = msg.from_user
-    if not u:
-        return "Unknown"
-    return u.first_name or u.username or str(u.id)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -616,57 +575,47 @@ async def _requester(msg: Message) -> str:
 @app.on_message(filters.command("start") & filters.group)
 async def cmd_start(_, msg: Message):
     await msg.reply(
-        "🎬 **VC Movie Bot — Commands**\n\n"
+        "🎬 **VC Movie Bot**\n\n"
         "`/play [url]` — Reply to video or give URL\n"
         "`/pause` `/resume` `/stop` `/skip` `/replay`\n"
-        "`/seek 1:23:45` — Jump to timestamp\n"
-        "`/speed 1.5` — Playback speed (0.5–2.0)\n"
+        "`/seek 1:23` — Jump to timestamp\n"
+        "`/speed 1.5` — Speed (0.5–2.0)\n"
         "`/volume 80` — Volume (0–200)\n"
-        "`/loop` — Toggle loop mode\n"
-        "`/shuffle` — Toggle shuffle mode\n"
-        "`/queue` — Show queue\n"
-        "`/remove 2` — Remove item from queue\n"
-        "`/clearqueue` — Clear entire queue\n"
+        "`/loop` — Toggle loop\n"
+        "`/shuffle` — Toggle shuffle\n"
+        "`/queue` `/remove 2` `/clearqueue`\n"
         "`/subtitle` — Reply to .srt file\n"
-        "`/status` — Refresh now-playing panel\n"
+        "`/status` — Refresh panel\n"
     )
 
 
 @app.on_message(filters.command("play") & filters.group)
 async def cmd_play(_, msg: Message):
-    parts = msg.text.split(None, 1)
-    url   = parts[1].strip() if len(parts) > 1 else None
-
+    parts  = msg.text.split(None, 1)
+    url    = parts[1].strip() if len(parts) > 1 else None
     status = await msg.reply("⏳ Fetching media…")
     try:
         path, title, duration, thumb = await resolve_media(app, msg, url)
     except ValueError as e:
         await status.edit(f"❌ {e}")
         return
-
-    item = MediaItem(
-        title=title, file_path=path, duration=duration,
-        requested_by=await _requester(msg), thumbnail=thumb,
-    )
+    requester = msg.from_user.first_name if msg.from_user else "Unknown"
+    item  = MediaItem(title=title, file_path=path, duration=duration,
+                      requested_by=requester, thumbnail=thumb)
     state = get_state(msg.chat.id)
-
     if state.current:
         if len(state.queue) >= MAX_QUEUE:
             await status.edit("❌ Queue is full.")
             return
         state.queue.append(item)
-        await status.edit(
-            f"📋 Added to queue: **{title}**\n"
-            f"Position: #{len(state.queue)}"
-        )
+        await status.edit(f"📋 Added to queue: **{title}**\nPosition: #{len(state.queue)}")
         return
-
     ok = await player.play(msg.chat.id, item)
     if ok:
         await status.delete()
         await send_panel(msg.chat.id, player.now_playing_text(msg.chat.id), thumb)
     else:
-        await status.edit("❌ Failed to stream. Is a Voice Chat active in this group?")
+        await status.edit("❌ Failed to stream. Is a Voice Chat active?")
 
 
 @app.on_message(filters.command("pause") & filters.group)
@@ -690,23 +639,23 @@ async def cmd_resume(_, msg: Message):
 @app.on_message(filters.command("stop") & filters.group)
 async def cmd_stop(_, msg: Message):
     await player.stop(msg.chat.id)
-    await msg.reply("⏹ Stopped and left the voice chat.")
+    await msg.reply("⏹ Stopped.")
 
 
 @app.on_message(filters.command("skip") & filters.group)
 async def cmd_skip(_, msg: Message):
     nxt = await player.skip(msg.chat.id)
     if nxt:
-        await msg.reply(f"⏭ Skipped. Now playing: **{nxt.title}**")
+        await msg.reply(f"⏭ Now playing: **{nxt.title}**")
         await refresh_panel(msg.chat.id)
     else:
-        await msg.reply("⏭ Skipped. Queue is empty.")
+        await msg.reply("⏭ Queue is empty.")
 
 
 @app.on_message(filters.command("replay") & filters.group)
 async def cmd_replay(_, msg: Message):
     if await player.replay(msg.chat.id):
-        await msg.reply("⏮ Restarting from beginning.")
+        await msg.reply("⏮ Restarting.")
         await refresh_panel(msg.chat.id)
     else:
         await msg.reply("Nothing is playing.")
@@ -720,7 +669,7 @@ async def cmd_seek(_, msg: Message):
         return
     secs = parse_time(parts[1])
     if secs is None:
-        await msg.reply("❌ Invalid format. Use `MM:SS`, `HH:MM:SS`, or plain seconds.")
+        await msg.reply("❌ Use `MM:SS` or `HH:MM:SS`.")
         return
     if await player.seek(msg.chat.id, secs):
         await msg.reply(f"⏩ Seeked to `{fmt_time(secs)}`.")
@@ -733,16 +682,16 @@ async def cmd_seek(_, msg: Message):
 async def cmd_speed(_, msg: Message):
     parts = msg.text.split()
     if len(parts) < 2:
-        await msg.reply("Usage: `/speed 1.5`  (0.5 – 2.0)")
+        await msg.reply("Usage: `/speed 1.5`")
         return
     try:
         spd = float(parts[1])
-    except ValueError:
-        await msg.reply("❌ Invalid speed value.")
+    except:
+        await msg.reply("❌ Invalid speed.")
         return
     await player.set_speed(msg.chat.id, spd)
     state = get_state(msg.chat.id)
-    await msg.reply(f"⚡ Speed set to `{state.speed}x`.")
+    await msg.reply(f"⚡ Speed: `{state.speed}x`.")
     await refresh_panel(msg.chat.id)
 
 
@@ -751,16 +700,16 @@ async def cmd_volume(_, msg: Message):
     parts = msg.text.split()
     if len(parts) < 2:
         state = get_state(msg.chat.id)
-        await msg.reply(f"🔊 Current volume: `{state.volume}%`\nUsage: `/volume 80`")
+        await msg.reply(f"🔊 Volume: `{state.volume}%`\nUsage: `/volume 80`")
         return
     try:
         vol = int(parts[1])
-    except ValueError:
+    except:
         await msg.reply("❌ Invalid value.")
         return
     await player.set_volume(msg.chat.id, vol)
     state = get_state(msg.chat.id)
-    await msg.reply(f"🔊 Volume set to `{state.volume}%`.")
+    await msg.reply(f"🔊 Volume: `{state.volume}%`.")
     await refresh_panel(msg.chat.id)
 
 
@@ -788,11 +737,11 @@ async def cmd_queue(_, msg: Message):
 async def cmd_remove(_, msg: Message):
     parts = msg.text.split()
     if len(parts) < 2:
-        await msg.reply("Usage: `/remove 2` (1-based index)")
+        await msg.reply("Usage: `/remove 2`")
         return
     try:
         idx = int(parts[1])
-    except ValueError:
+    except:
         await msg.reply("❌ Invalid index.")
         return
     state = get_state(msg.chat.id)
@@ -814,19 +763,32 @@ async def cmd_clearqueue(_, msg: Message):
 async def cmd_subtitle(_, msg: Message):
     target = msg.reply_to_message
     if not target or not target.document:
-        await msg.reply("Reply to an .srt subtitle file with /subtitle")
+        await msg.reply("Reply to an .srt file with /subtitle")
         return
     if not target.document.file_name.endswith(".srt"):
-        await msg.reply("❌ Only .srt files are supported.")
+        await msg.reply("❌ Only .srt files.")
         return
     status   = await msg.reply("⏳ Downloading subtitle…")
     srt_path = await app.download_media(
         target, file_name=f"{DOWNLOAD_DIR}/{target.document.file_id}.srt"
     )
-    if await player.enable_subtitles(msg.chat.id, srt_path):
+    esc = srt_path.replace("\\", "/").replace(":", "\\:")
+    state = get_state(msg.chat.id)
+    if not state.current:
+        await status.edit("❌ Nothing is playing.")
+        return
+    extra  = ["-vf", f"subtitles='{esc}'", "-af", "anull"]
+    stream = AudioVideoPiped(
+        state.current.file_path,
+        audio_parameters=HighQualityAudio(),
+        video_parameters=HighQualityVideo(),
+        additional_ffmpeg_parameters=" ".join(extra),
+    )
+    try:
+        await player.call.change_stream(msg.chat.id, stream)
         await status.edit("📝 Subtitles enabled.")
-    else:
-        await status.edit("❌ Failed. Is something currently playing?")
+    except:
+        await status.edit("❌ Failed.")
 
 
 @app.on_message(filters.command("status") & filters.group)
@@ -837,7 +799,7 @@ async def cmd_status(_, msg: Message):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  CALLBACK QUERIES  (inline button presses)
+#  CALLBACK QUERIES
 # ═══════════════════════════════════════════════════════════════
 
 @app.on_callback_query()
@@ -845,56 +807,39 @@ async def on_button(_, query: CallbackQuery):
     chat_id = query.message.chat.id
     data    = query.data
     state   = get_state(chat_id)
-
     await query.answer()
 
-    if data == "pause":
-        await player.pause(chat_id)
-    elif data == "resume":
-        await player.resume(chat_id)
-    elif data == "stop":
-        await player.stop(chat_id)
-        try:
-            await query.message.edit_text("⏹ Stopped.", reply_markup=stopped_keyboard())
-        except Exception:
-            pass
-        return
-    elif data == "replay":
-        await player.replay(chat_id)
-    elif data == "skip":
-        nxt = await player.skip(chat_id)
-        if not nxt:
-            try:
-                await query.message.edit_text("⏹ Queue empty.", reply_markup=stopped_keyboard())
-            except Exception:
-                pass
-            return
-    elif data == "seek_back":
-        await player.seek(chat_id, max(0, state.position - 30))
-    elif data == "seek_fwd":
-        await player.seek(chat_id, state.position + 30)
-    elif data == "vol_down":
-        await player.set_volume(chat_id, state.volume - 10)
-    elif data == "vol_up":
-        await player.set_volume(chat_id, state.volume + 10)
-    elif data == "toggle_loop":
-        state.loop = not state.loop
+    if   data == "pause":       await player.pause(chat_id)
+    elif data == "resume":      await player.resume(chat_id)
+    elif data == "replay":      await player.replay(chat_id)
+    elif data == "seek_back":   await player.seek(chat_id, max(0, state.position - 30))
+    elif data == "seek_fwd":    await player.seek(chat_id, state.position + 30)
+    elif data == "vol_down":    await player.set_volume(chat_id, state.volume - 10)
+    elif data == "vol_up":      await player.set_volume(chat_id, state.volume + 10)
+    elif data == "toggle_loop": state.loop = not state.loop
     elif data == "queue":
         await query.answer(format_queue(chat_id)[:200], show_alert=True)
         return
+    elif data == "stop":
+        await player.stop(chat_id)
+        try: await query.message.edit_text("⏹ Stopped.", reply_markup=stopped_keyboard())
+        except: pass
+        return
+    elif data == "skip":
+        nxt = await player.skip(chat_id)
+        if not nxt:
+            try: await query.message.edit_text("⏹ Queue empty.", reply_markup=stopped_keyboard())
+            except: pass
+            return
     elif data.startswith("speed_"):
         await player.set_speed(chat_id, float(data.split("_", 1)[1]))
 
-    # Refresh panel
     text = player.now_playing_text(chat_id)
     kb   = player_keyboard(paused=state.paused, loop=state.loop)
-    try:
-        await query.message.edit_caption(caption=text, reply_markup=kb)
-    except Exception:
-        try:
-            await query.message.edit_text(text, reply_markup=kb)
-        except Exception:
-            pass
+    try: await query.message.edit_caption(caption=text, reply_markup=kb)
+    except:
+        try: await query.message.edit_text(text, reply_markup=kb)
+        except: pass
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -902,9 +847,16 @@ async def on_button(_, query: CallbackQuery):
 # ═══════════════════════════════════════════════════════════════
 
 async def main():
+    # Start keep-alive server in background thread
+    t = threading.Thread(target=run_keep_alive, daemon=True)
+    t.start()
+
+    # Start VC player + bot
     await player.start()
     await app.start()
-    print("✅ VC Movie Bot is running. Press Ctrl+C to stop.")
+    print("✅ VC Movie Bot is running!")
+    print(f"🌐 Keep-alive server on port {KEEP_ALIVE_PORT}")
+    print("📌 Add this Replit URL to UptimeRobot to stay alive 24/7")
     await asyncio.Event().wait()
 
 
