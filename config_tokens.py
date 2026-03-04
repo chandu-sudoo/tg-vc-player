@@ -4,12 +4,12 @@
 
 # ── Step 1: Get from https://my.telegram.org ──────────────────
 #   Login → API Development Tools → Create App
-API_ID   = 123456            # replace with your numeric API ID
-API_HASH = "your_api_hash"   # replace with your API hash string
+API_ID   = 21641079            # replace with your numeric API ID
+API_HASH = "9826cc0efdd12c7dd7f82b31e4bf57cd"   # replace with your API hash string
 
 # ── Step 2: Get from @BotFather on Telegram ───────────────────
 #   /newbot → follow steps → copy the token
-BOT_TOKEN = "123456789:ABCDefgh_your_bot_token_here"
+BOT_TOKEN = "8219593800:AAHpHU7EzSBrcDMOZz0sWnz8KqNHCLg960A"
 
 # ── Optional settings (leave as-is to use defaults) ───────────
 DOWNLOAD_DIR   = "./downloads"   # folder to save downloaded videos
